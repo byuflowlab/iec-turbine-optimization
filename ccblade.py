@@ -36,7 +36,7 @@ from scipy.interpolate import RectBivariateSpline, bisplev
 # from zope.interface import Interface, implements
 import warnings
 
-from airfoilprep import Airfoil
+# from airfoilprep import Airfoil
 import _bem
 
 
@@ -104,9 +104,14 @@ class CCAirfoil:
             cd[i, j] is the drag coefficient at alpha[i] and Re[j]
 
         """
+        # self.alpha = alpha
+        # self.Re = Re
+        # self.cl = cl
+        # self.cd = cd
 
         alpha = np.radians(alpha)
         self.one_Re = False
+
 
         # special case if zero or one Reynolds number (need at least two for bivariate spline)
         if len(Re) < 2:
@@ -123,25 +128,25 @@ class CCAirfoil:
         self.cd_spline = RectBivariateSpline(alpha, Re, cd, kx=kx, ky=ky, s=0.001)
 
 
-    @classmethod
-    def initFromAerodynFile(cls, aerodynFile):
-        """convenience method for initializing with AeroDyn formatted files
+    # @classmethod
+    # def initFromAerodynFile(cls, aerodynFile):
+    #     """convenience method for initializing with AeroDyn formatted files
 
-        Parameters
-        ----------
-        aerodynFile : str
-            location of AeroDyn style airfoiil file
+    #     Parameters
+    #     ----------
+    #     aerodynFile : str
+    #         location of AeroDyn style airfoiil file
 
-        Returns
-        -------
-        af : CCAirfoil
-            a constructed CCAirfoil object
+    #     Returns
+    #     -------
+    #     af : CCAirfoil
+    #         a constructed CCAirfoil object
 
-        """
+    #     """
 
-        af = Airfoil.initFromAerodynFile(aerodynFile)
-        alpha, Re, cl, cd, cm = af.createDataGrid()
-        return cls(alpha, Re, cl, cd)
+    #     af = Airfoil.initFromAerodynFile(aerodynFile)
+    #     alpha, Re, cl, cd, cm = af.createDataGrid()
+    #     return cls(alpha, Re, cl, cd)
 
 
     def evaluate(self, alpha, Re):
@@ -234,7 +239,7 @@ class BlendedCCAirfoil:
 
 class CCBlade:
 
-    def __init__(self, r, chord, theta, af, Rhub, Rtip, B=3, rho=1.225, mu=1.81206e-5,
+    def __init__(self, r, chord, theta, af, blend, Rhub, Rtip, B=3, rho=1.225, mu=1.81206e-5,
                  precone=0.0, tilt=0.0, yaw=0.0, shearExp=0.2, hubHt=80.0,
                  nSector=8, precurve=None, precurveTip=0.0, presweep=None, presweepTip=0.0,
                  tiploss=True, hubloss=True, wakerotation=True, usecd=True, iterRe=1, derivatives=False):
@@ -309,6 +314,7 @@ class CCBlade:
         self.chord = np.array(chord)
         self.theta = np.radians(theta)
         self.af = af
+        self.blend = blend
         self.Rhub = Rhub
         self.Rtip = Rtip
         self.B = B
@@ -352,7 +358,7 @@ class CCBlade:
 
 
     # residual
-    def __runBEM(self, phi, r, chord, theta, af, Vx, Vy):
+    def __runBEM(self, phi, r, chord, theta, af, blend, Vx, Vy):
         """residual of BEM method and other corresponding variables"""
 
         a = 0.0
@@ -361,7 +367,7 @@ class CCBlade:
 
             alpha, W, Re = _bem.relativewind(phi, a, ap, Vx, Vy, self.pitch,
                                              chord, theta, self.rho, self.mu)
-            cl, cd = af.evaluate(alpha, Re)
+            cl, cd = af.evaluate(alpha, Re, blend)
 
             fzero, a, ap = _bem.inductionfactors(r, chord, self.Rhub, self.Rtip, phi,
                                                  cl, cd, self.B, Vx, Vy, **self.bemoptions)
@@ -369,16 +375,16 @@ class CCBlade:
         return fzero, a, ap
 
 
-    def __errorFunction(self, phi, r, chord, theta, af, Vx, Vy):
+    def __errorFunction(self, phi, r, chord, theta, af, blend, Vx, Vy):
         """strip other outputs leaving only residual for Brent's method"""
 
-        fzero, a, ap = self.__runBEM(phi, r, chord, theta, af, Vx, Vy)
+        fzero, a, ap = self.__runBEM(phi, r, chord, theta, af, blend, Vx, Vy)
 
         return fzero
 
 
 
-    def __residualDerivatives(self, phi, r, chord, theta, af, Vx, Vy):
+    def __residualDerivatives(self, phi, r, chord, theta, af, blend, Vx, Vy):
         """derivatives of fzero, a, ap"""
 
         if self.iterRe != 1:
@@ -397,8 +403,8 @@ class CCBlade:
         dblend_dx = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
 
         # cl, cd (spline derivatives)
-        cl, cd = af.evaluate(alpha, Re)
-        dcl_dalpha, dcl_dRe, dcd_dalpha, dcd_dRe, dcl_dblend, dcd_dblend = af.derivatives(alpha, Re)
+        cl, cd = af.evaluate(alpha, Re, blend)
+        dcl_dalpha, dcl_dRe, dcd_dalpha, dcd_dRe, dcl_dblend, dcd_dblend = af.derivatives(alpha, Re, blend)
 
         # chain rule
         dcl_dx = dcl_dalpha*dalpha_dx + dcl_dRe*dRe_dx + dcl_dblend*dblend_dx
@@ -415,21 +421,21 @@ class CCBlade:
 
 
 
-    def __loads(self, phi, rotating, r, chord, theta, af, Vx, Vy):
+    def __loads(self, phi, rotating, r, chord, theta, af, blend, Vx, Vy):
         """normal and tangential loads at one section (and optionally derivatives)"""
 
         cphi = cos(phi)
         sphi = sin(phi)
 
         if rotating:
-            _, a, ap = self.__runBEM(phi, r, chord, theta, af, Vx, Vy)
+            _, a, ap = self.__runBEM(phi, r, chord, theta, af, blend, Vx, Vy)
         else:
             a = 0.0
             ap = 0.0
 
         alpha, W, Re = _bem.relativewind(phi, a, ap, Vx, Vy, self.pitch,
                                          chord, theta, self.rho, self.mu)
-        cl, cd = af.evaluate(alpha, Re)
+        cl, cd = af.evaluate(alpha, Re, blend)
 
         cn = cl*cphi + cd*sphi  # these expressions should always contain drag
         ct = cl*sphi - cd*cphi
@@ -445,7 +451,7 @@ class CCBlade:
 
         # derivative of residual function
         if rotating:
-            dR_dx, da_dx, dap_dx = self.__residualDerivatives(phi, r, chord, theta, af, Vx, Vy)
+            dR_dx, da_dx, dap_dx = self.__residualDerivatives(phi, r, chord, theta, af, blend, Vx, Vy)
             dphi_dx = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         else:
             dR_dx = np.zeros(9)
@@ -457,6 +463,8 @@ class CCBlade:
         # x = [phi, chord, theta, Vx, Vy, r, Rhub, Rtip, pitch, blend]  (derivative order)
         dx_dx = np.eye(10)
         dchord_dx = np.array([0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        dblend_dx = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+
 
         # alpha, W, Re (Tapenade)
 
@@ -466,11 +474,11 @@ class CCBlade:
             self.rho, self.mu)
 
         # cl, cd (spline derivatives)
-        dcl_dalpha, dcl_dRe, dcd_dalpha, dcd_dRe = af.derivatives(alpha, Re)
+        dcl_dalpha, dcl_dRe, dcd_dalpha, dcd_dRe, dcl_dblend, dcd_dblend = af.derivatives(alpha, Re, blend)
 
         # chain rule
-        dcl_dx = dcl_dalpha*dalpha_dx + dcl_dRe*dRe_dx
-        dcd_dx = dcd_dalpha*dalpha_dx + dcd_dRe*dRe_dx
+        dcl_dx = dcl_dalpha*dalpha_dx + dcl_dRe*dRe_dx + dcl_dblend*dblend_dx
+        dcd_dx = dcd_dalpha*dalpha_dx + dcd_dRe*dRe_dx + dcd_dblend*dblend_dx
 
         # cn, cd
         dcn_dx = dcl_dx*cphi - cl*sphi*dphi_dx + dcd_dx*sphi + cd*cphi*dphi_dx
@@ -576,8 +584,8 @@ class CCBlade:
         dTp_dVx = np.zeros(n)
         dNp_dVy = np.zeros(n)
         dTp_dVy = np.zeros(n)
-        dNp_dz = np.zeros((6, n))
-        dTp_dz = np.zeros((6, n))
+        dNp_dz = np.zeros((7, n))
+        dTp_dz = np.zeros((7, n))
 
         errf = self.__errorFunction
         rotating = (Omega != 0)
@@ -586,7 +594,7 @@ class CCBlade:
         for i in range(n):
 
             # index dependent arguments
-            args = (self.r[i], self.chord[i], self.theta[i], self.af[i], Vx[i], Vy[i])
+            args = (self.r[i], self.chord[i], self.theta[i], self.af[i], self.blend[i], Vx[i], Vy[i])
 
             if not rotating:  # non-rotating
 
@@ -807,8 +815,8 @@ class CCBlade:
         if self.derivatives:
             dT_ds = np.zeros((npts, 11))
             dQ_ds = np.zeros((npts, 11))
-            dT_dv = np.zeros((npts, 5, len(self.r)))
-            dQ_dv = np.zeros((npts, 5, len(self.r)))
+            dT_dv = np.zeros((npts, 6, len(self.r)))
+            dQ_dv = np.zeros((npts, 6, len(self.r)))
 
         for i in range(npts):  # iterate across conditions
 
