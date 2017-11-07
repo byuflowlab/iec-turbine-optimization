@@ -231,6 +231,24 @@ class BlendedCCAirfoil:
         return dcl_dalpha, dcl_dRe, dcd_dalpha, dcd_dRe, dcl_dblend, dcd_dblend
 
 
+class BlendedThickness:
+
+    def __init__(self, tau1, tau2):
+        self.tau1 = tau1
+        self.tau2 = tau2
+
+    def thickness(self, chord, blend):
+        tau = blend*self.tau1 + (1-blend)*self.tau2
+        t = tau*chord
+
+        return t
+
+    def derivatives(self, chord, blend):
+
+        dt_dchord = blend*self.tau1 + (1-blend)*self.tau2
+        dt_dblend = chord*self.tau1 - chord*self.tau2
+
+        return dt_dchord, dt_dblend
 
 # ------------------
 #  Main Class: CCBlade

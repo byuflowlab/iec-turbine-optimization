@@ -2,6 +2,7 @@
 input_format_version: 0
 
 planform: 
+    hub_radius: 2.8
     SParam:
         - 0.00000
         - 0.03057
