@@ -51,6 +51,97 @@ class CCBlade(ExplicitComponent):
             inputs["Uhub"], inputs["Omega"], inputs["pitch"], coefficient=False)
 
 
+class UnregulatedPowerCurve(ExplicitComponent):
+
+    def setup(self):
+
+        self.add_input('V', shape=m)
+        self.add_input('Omega_min')  # RPM
+        self.add_input('Omega_max')
+        self.add_input('tsropt')
+        self.add_input('Rtip')
+
+        self.add_output('Omega', shape=m)  # RPM
+
+        # no derivatives needed
+
+    def compute(self, inputs, outputs):
+
+        V = inputs['V']
+        tsr = inputs['tsropt']
+        Rtip = inputs['Rtip']
+
+        RS2RPM = 30.0/np.pi
+        Omega_d = tsr*V/Rtip*RS2RPM
+        Omega = np.minimum(Omega_d, inputs['Omega_max'])
+        Omega = np.maximum(Omega_d, inputs['Omega_min'])
+
+        outputs['Omega'] = Omega
+
+
+
+
+class WeibullCDF(ExplicitComponent):
+    """Weibull cumulative distribution function"""
+
+    def setup(self):
+        self.add_input('V', shape=m)
+        self.add_input('A', desc='scale factor')
+        self.add_input('k', desc='shape or form factor')
+
+        self.add_output('F', shape=m)
+
+        # self.declare_partials('F', 'V')
+
+    def compute(self, inputs, outputs):
+
+        outputs['F'] = 1.0 - np.exp(-(inputs['V']/inputs['A'])**inputs['k'])
+
+
+
+def trapz_deriv(y, x):
+    """trapezoidal integration and derivatives with respect to integrand or variable."""
+
+    dI_dy = np.gradient(x)
+    dI_dy[0] /= 2
+    dI_dy[-1] /= 2
+
+    dI_dx = -np.gradient(y)
+    dI_dx[0] = -0.5*(y[0] + y[1])
+    dI_dx[-1] = 0.5*(y[-1] + y[-2])
+
+    return dI_dy, dI_dx
+
+
+class AEP(ExplicitComponent):
+    """integrate to find annual energy production"""
+
+    def setup(self):
+        # inputs
+        self.add_input('CDF_V', shape=m)
+        self.add_input('P', shape=m, desc='power curve (power)')  # units='W',
+        # lossFactor = Float(iotype='in', desc='multiplicative factor for availability and other losses (soiling, array, etc.)')
+
+        # outputs
+        self.add_output('AEP', desc='annual energy production')  # units='kW*h',
+
+        self.declare_partials('AEP', 'P')
+
+    def compute(self, inputs, outputs):
+
+        outputs['AEP'] = np.trapz(inputs['P'], inputs['CDF_V'])/1e3*365.0*24.0  # in kWh
+
+    def compute_partials(self, inputs, J):
+
+        factor = 1.0/1e3*365.0*24.0
+
+        dAEP_dP, dAEP_dCDF = trapz_deriv(inputs['P'], inputs['CDF_V'])
+        dAEP_dP *= factor
+
+        J['AEP', 'P'] = dAEP_dP
+
+
+
 
 if __name__ == '__main__':
     import yaml
@@ -150,15 +241,31 @@ if __name__ == '__main__':
     model.add_subsystem('inputs', ivc, promotes=['*'])
     model.add_subsystem('ccblade', CCBlade(), promotes=['*'])
 
-    prob = Problem(model)
+    ivc2 = IndepVarComp()
+    V = np.arange(4, 25)
+    m = len(V)
+    A = 8.0
+    k = 2.0
+    print V
+    ivc2.add_output('V', V)
+    ivc2.add_output('A', A)
+    ivc2.add_output('k', k)
+    model2 = Group()
+    model2.add_subsystem('inputs', ivc2, promotes=['*'])
+    model2.add_subsystem('weibull', WeibullCDF(), promotes=['*'])
+
+    prob = Problem(model2)
     prob.setup()
     prob.run_model()
+
+    print prob['F']
+
     # print prob['T']
     # print prob['Q']
     # print prob['P']
 
-    CP = prob['P']/(0.5*rho*Uhub**3 * np.pi*Rtip**2)
+    # CP = prob['P']/(0.5*rho*Uhub**3 * np.pi*Rtip**2)
 
-    import matplotlib.pyplot as plt
-    plt.plot(tsr, CP)
-    plt.show()
+    # import matplotlib.pyplot as plt
+    # plt.plot(tsr, CP)
+    # plt.show()
