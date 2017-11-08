@@ -2,6 +2,41 @@ import numpy as np
 from openmdao.core.explicitcomponent import ExplicitComponent
 from openmdao.api import pyOptSparseDriver
 from ccblade import BlendedCCAirfoil, BlendedThickness, CCBlade as CCBlade_PY
+from akima import akima_interp_with_derivs
+
+
+class Spline(ExplicitComponent):
+
+    def setup(self):
+        # self.add_input('Rhub')
+        # self.add_input('Rtip')
+        # self.add_input('r2')
+        self.add_input('rspline', shape=nspline)
+        self.add_input('chordspline', shape=nspline)
+        self.add_input('thetaspline', shape=nspline)
+        self.add_input('r', shape=n)
+
+        self.add_output('chord', shape=n)
+        self.add_output('theta', shape=n)
+
+        self.declare_partials('chord', 'chordspline')
+        self.declare_partials('theta', 'thetaspline')
+
+    def compute(self, inputs, outputs):
+
+        # rspline = np.linspace(inputs['r2']*inputs['Rtip'], inputs['Rtip'], nspline-1)
+        # rspline = np.concatenate([inputs['Rhub'], rspline])
+
+        outputs['chord'], dchorddr, dchorddrpt, self.dchorddchordspline = akima_interp_with_derivs(
+            inputs['rspline'], inputs['chordspline'], inputs['r'])
+
+        outputs['theta'], dthetadr, dthetadrpt, self.dthetadthetaspline = akima_interp_with_derivs(
+            inputs['rspline'], inputs['thetaspline'], inputs['r'])
+
+    def compute_partials(self, inputs, J):
+        J['chord', 'chordspline'] = self.dchorddchordspline
+        J['theta', 'thetaspline'] = self.dthetadthetaspline
+        # J['chord', 'r2'] = self.dchorddrpt[:, 1]*inputs['Rtip']
 
 
 class CCBlade(ExplicitComponent):
@@ -207,8 +242,8 @@ if __name__ == '__main__':
     # create an input component
     ivc = IndepVarComp()
     ivc.add_output('r', r)
-    ivc.add_output('chord', initial['planform']['Chord'][1:-1])  # remove hub/tip
-    ivc.add_output('theta', initial['planform']['Twist'][1:-1])
+    # ivc.add_output('chord', initial['planform']['Chord'][1:-1])  # remove hub/tip
+    # ivc.add_output('theta', initial['planform']['Twist'][1:-1])
     ivc.add_output('Rhub', Rhub)
     ivc.add_output('Rtip', Rtip)
     ivc.add_output('hubHt', 0.0)  # irrelevant if no shear
@@ -246,6 +281,7 @@ if __name__ == '__main__':
     ivc.add_output('pitch', pitch)
     ivc.add_output('PDF', pdf)
 
+
     model = Group()
     model.add_subsystem('inputs', ivc, promotes=['*'])
     model.add_subsystem('ccblade', CCBlade(), promotes=['*'])
@@ -254,7 +290,7 @@ if __name__ == '__main__':
 
     prob = Problem(model)
 
-    # -------- power regulation optimization (just to set inital values) -----
+    # # -------- power regulation optimization (just to set inital values) -----
 
     # # run optimization to determine pitch for base model
     # prob.driver = pyOptSparseDriver()
@@ -287,6 +323,8 @@ if __name__ == '__main__':
     # plt.figure()
     # plt.plot(r, prob['chord'])
     # plt.figure()
+    # plt.plot(r, prob['theta'])
+    # plt.figure()
     # plt.plot(r, prob['t'])
     # plt.plot(r, tmin)
     # plt.figure()
@@ -303,6 +341,27 @@ if __name__ == '__main__':
     Tmax0 = 1257095.74514
     Bfw0 = 24506700.5989
 
+    # spline parameterization
+    nspline = 6
+    rspline = np.linspace(Rhub, Rtip, nspline)
+    ivc.add_output('rspline', rspline)  # starting point
+    chordspline = np.interp(rspline, r, initial['planform']['Chord'][1:-1])
+    thetaspline = np.interp(rspline, r, initial['planform']['Twist'][1:-1])
+    ivc.add_output('chordspline', chordspline)  # starting point
+    ivc.add_output('thetaspline', thetaspline)  # starting point
+
+    model = Group()
+    model.add_subsystem('inputs', ivc, promotes=['*'])
+    model.add_subsystem('spline', Spline(), promotes=['*'])
+    model.add_subsystem('ccblade', CCBlade(), promotes=['*'])
+    model.add_subsystem('thickness', ThicknessMargin(), promotes=['*'])
+    model.add_subsystem('aep', AEP(), promotes=['*'])
+
+    prob = Problem(model)
+
+    # # prob.setup()
+    # # prob.check_partials(compact_print=True)
+
     # # ------------ run actual optmization -----
 
     # prob.driver = pyOptSparseDriver()
@@ -310,10 +369,12 @@ if __name__ == '__main__':
 
     # # prob.driver.opt_settings['Major optimality tolerance'] = 1e-6
 
-    # prob.model.add_design_var('chord', lower=0.0, upper=10.0)
-    # prob.model.add_design_var('theta', lower=-10, upper=30.0)
+    # # prob.model.add_design_var('chord', lower=0.0, upper=10.0)
+    # # prob.model.add_design_var('theta', lower=-10, upper=30.0)
+    # prob.model.add_design_var('chordspline', lower=0.0, upper=10.0)
+    # prob.model.add_design_var('thetaspline', lower=0.0, upper=30.0)
     # prob.model.add_design_var('blend', lower=0.0, upper=1.0)
-    # prob.model.add_design_var('pitch', lower=0.0, upper=20.0)
+    # prob.model.add_design_var('pitch', lower=0.0, upper=30.0)
 
     # prob.model.add_objective('AEP', scaler=-1.0/AEP0)  # maximize
 
@@ -325,63 +386,93 @@ if __name__ == '__main__':
 
     # prob.setup()
     # prob['pitch'] = pitch0
+    # # prob.run_model()
+    # # prob.check_totals()
     # prob.run_driver()
 
-    # print repr(prob['chord'])
-    # print repr(prob['theta'])
+    # print repr(prob['chordspline'])
+    # print repr(prob['thetaspline'])
+    # # print repr(prob['chord'])
+    # # print repr(prob['theta'])
     # print repr(prob['blend'])
     # print repr(prob['pitch'])
     # print repr(prob['AEP'])
 
-    # ------ print results ----
+    # # ------ print results ----
 
-    chord = np.array([ 8.93833333,  8.54816667,  7.81966667,  6.938     ,  5.97333333,
-        5.09516667,  8.8548126 ,  7.99550941,  5.95666667,  5.42055556,
-        4.96194444,  4.55583333,  4.15444444,  4.49634551,  4.1354921 ,
-        4.29336588,  4.34184261,  4.31958399,  4.28652301,  4.24613446,
-        4.20851552,  4.15745326,  4.10082724,  4.03664055,  3.96594352,
-        3.88826966,  3.78597026,  3.67576357,  3.54947714,  3.40284257,
-        3.23473786,  3.03996166,  2.80107282,  2.54414293,  2.26877459,
-        1.93628802,  1.54887319,  1.87872384])
-    theta = np.array([ 29.59961895,  20.60267425,  14.07574485,   8.39071291,
-         4.59898245,   1.82387254,  12.88868913,  10.93396311,
-         9.82700858,   8.61454412,   7.57391329,   6.6666137 ,
-         5.79337362,   4.13698913,   3.43315284,   3.63611537,
-         3.55495721,   3.47124253,   3.3807371 ,   3.28433599,
-         3.19708406,   3.09954296,   3.00175352,   2.89824626,
-         2.79710415,   2.69646859,   2.57279114,   2.4546052 ,
-         2.32859262,   2.1963466 ,   2.05580362,   1.89992937,
-         1.68740727,   1.48524427,   1.30470774,   1.0491293 ,
-         0.73660942,  -2.16956379])
-    blend = np.array([ 0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,
-        0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,
-        0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.])
-    pitch = np.array([  0.95132649,   0.67035572,   0.12989032,   0.        ,
+    chordspline = np.array([ 7.72904009,  9.66650332,  4.642612  ,  3.75945005,  2.8982931 ,
+        1.87423212])
+    thetaspline = np.array([ 16.85396088,  12.10532789,   5.84643576,   1.60971854,
+         0.        ,   0.        ])
+    blend = np.array([ 0.07844398,  0.        ,  0.        ,  0.        ,  0.        ,
+        0.        ,  0.        ,  0.        ,  0.        ,  0.        ,
+        0.03376377,  0.        ,  0.        ,  0.35197787,  0.06817927,
+        0.        ,  0.1009294 ,  0.        ,  0.        ,  0.        ,
+        0.        ,  0.        ,  0.        ,  0.        ,  0.        ,
+        0.        ,  0.        ,  0.        ,  0.        ,  0.        ,
+        0.        ,  0.        ,  0.        ,  0.        ,  0.        ,
+        0.        ,  0.        ,  0.        ])
+    pitch = np.array([  2.59660269,   1.9575017 ,   1.0509937 ,   0.        ,
          0.        ,   0.        ,   0.        ,   0.        ,
-         0.        ,   0.37071199,   1.49137906,   3.22475018,
-         5.50216933,   7.26500237,   8.78991032,  10.17124843,
-        12.6620359 ,  14.92132383,  20.        ])
-    AEPopt = 32022268.73061096
+         0.        ,   0.87327895,   2.45057508,   4.35385999,
+         6.81823811,   8.71234371,  10.34547414,  11.82074766,
+        14.47373294,  16.87127535,  22.21422761])
+    AEPopt = 32247377.56358137
+
+    # # # chord = np.array([ 8.93833333,  8.54816667,  7.81966667,  6.938     ,  5.97333333,
+    # # #     5.09516667,  8.8548126 ,  7.99550941,  5.95666667,  5.42055556,
+    # # #     4.96194444,  4.55583333,  4.15444444,  4.49634551,  4.1354921 ,
+    # # #     4.29336588,  4.34184261,  4.31958399,  4.28652301,  4.24613446,
+    # # #     4.20851552,  4.15745326,  4.10082724,  4.03664055,  3.96594352,
+    # # #     3.88826966,  3.78597026,  3.67576357,  3.54947714,  3.40284257,
+    # # #     3.23473786,  3.03996166,  2.80107282,  2.54414293,  2.26877459,
+    # # #     1.93628802,  1.54887319,  1.87872384])
+    # # # theta = np.array([ 29.59961895,  20.60267425,  14.07574485,   8.39071291,
+    # # #      4.59898245,   1.82387254,  12.88868913,  10.93396311,
+    # # #      9.82700858,   8.61454412,   7.57391329,   6.6666137 ,
+    # # #      5.79337362,   4.13698913,   3.43315284,   3.63611537,
+    # # #      3.55495721,   3.47124253,   3.3807371 ,   3.28433599,
+    # # #      3.19708406,   3.09954296,   3.00175352,   2.89824626,
+    # # #      2.79710415,   2.69646859,   2.57279114,   2.4546052 ,
+    # # #      2.32859262,   2.1963466 ,   2.05580362,   1.89992937,
+    # # #      1.68740727,   1.48524427,   1.30470774,   1.0491293 ,
+    # # #      0.73660942,  -2.16956379])
+    # # # blend = np.array([ 0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,
+    # # #     0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,
+    # # #     0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.])
+    # # # pitch = np.array([  0.95132649,   0.67035572,   0.12989032,   0.        ,
+    # # #      0.        ,   0.        ,   0.        ,   0.        ,
+    # # #      0.        ,   0.37071199,   1.49137906,   3.22475018,
+    # # #      5.50216933,   7.26500237,   8.78991032,  10.17124843,
+    # # #     12.6620359 ,  14.92132383,  20.        ])
+    # # # AEPopt = 32022268.73061096
 
     prob.setup()
-    prob['chord'] = chord
-    prob['theta'] = theta
+    # prob['chord'] = chord
+    prob['chordspline'] = chordspline
+    prob['thetaspline'] = thetaspline
     prob['blend'] = blend
     prob['pitch'] = pitch
     prob.run_model()
 
+    # ---- plot -----
+
     print prob['AEP']/AEP0
     print prob['AEP']
-    # print repr(prob['P'])
     print np.amax(prob['T'])/Tmax0
     print np.amax(prob['Bfw'])/Bfw0
     # print repr(Omega)
     print np.amax(prob['T'])
     print np.amax(prob['Bfw'])
+    print "chord =", repr(prob['chord'])
+    print "theta =", repr(prob['theta'])
+    print "P = ", repr(prob['P'])
 
     import matplotlib.pyplot as plt
     plt.figure()
     plt.plot(r, prob['chord'])
+    plt.figure()
+    plt.plot(r, prob['theta'])
     plt.figure()
     plt.plot(r, prob['tmargin'] + prob['tmin'])
     plt.plot(r, tmin)
