@@ -1,5 +1,6 @@
 import numpy as np
 from openmdao.core.explicitcomponent import ExplicitComponent
+from openmdao.api import pyOptSparseDriver
 from ccblade import BlendedCCAirfoil, BlendedThickness, CCBlade as CCBlade_PY
 
 
@@ -30,17 +31,18 @@ class CCBlade(ExplicitComponent):
         self.add_input("pitch", shape=m)
 
         self.add_output("T", shape=m)
-        self.add_output("Q", shape=m)
+        # self.add_output("Q", shape=m)
         self.add_output("P", shape=m)
         self.add_output("Bfw", shape=m)
 
-        self.declare_partials('*', '*', method='fd')  # FIXME
+        self.declare_partials('T', ['chord', 'theta', 'blend', 'pitch'])
+        self.declare_partials('P', ['chord', 'theta', 'blend', 'pitch'])
+        self.declare_partials('Bfw', ['chord', 'theta', 'blend', 'pitch'])
 
 
     def compute(self, inputs, outputs):
 
         # setup ccblade model
-        # TODO: no hub info was provided.  hub loss and tip loss turned off for now.
         ccblade = CCBlade_PY(inputs["r"], inputs["chord"], inputs["theta"], af,
             inputs["blend"], inputs["Rhub"], inputs["Rtip"], inputs["B"], inputs["rho"], inputs["mu"],
             inputs["precone"], inputs["tilt"], inputs["yaw"], inputs["shearExp"], inputs["hubHt"],
@@ -48,44 +50,44 @@ class CCBlade(ExplicitComponent):
             usecd=True, derivatives=True)
 
         # evaluate power, thrust
-        outputs["P"], outputs["T"], outputs["Q"], outputs["Bfw"], dP, dT, dQ, dBfw = ccblade.evaluate(
+        outputs["P"], outputs["T"], Q, outputs["Bfw"], self.dP, self.dT, self.dQ, self.dBfw = ccblade.evaluate(
             inputs["Uhub"], inputs["Omega"], inputs["pitch"], coefficient=False)
 
 
+    def compute_partials(self, inputs, J):
 
-# class WeibullCDF(ExplicitComponent):
-#     """Weibull cumulative distribution function"""
+        J['T', 'chord'] = self.dT['dchord']
+        J['T', 'theta'] = self.dT['dtheta']
+        J['T', 'blend'] = self.dT['dblend']
+        J['T', 'pitch'] = self.dT['dpitch']
 
-#     def setup(self):
-#         self.add_input('V', shape=m)
-#         self.add_input('A', desc='scale factor')
-#         self.add_input('k', desc='shape or form factor')
+        J['P', 'chord'] = self.dP['dchord']
+        J['P', 'theta'] = self.dP['dtheta']
+        J['P', 'blend'] = self.dP['dblend']
+        J['P', 'pitch'] = self.dP['dpitch']
 
-#         self.add_output('F', shape=m)
-
-#         # self.declare_partials('F', 'V')
-
-#     def compute(self, inputs, outputs):
-
-#         outputs['F'] = 1.0 - np.exp(-(inputs['V']/inputs['A'])**inputs['k'])
-
-
+        J['Bfw', 'chord'] = self.dBfw['dchord']
+        J['Bfw', 'theta'] = self.dBfw['dtheta']
+        J['Bfw', 'blend'] = self.dBfw['dblend']
+        J['Bfw', 'pitch'] = self.dBfw['dpitch']
 
 
-class Thickness(ExplicitComponent):
+
+class ThicknessMargin(ExplicitComponent):
 
     def setup(self):
         self.add_input('chord', shape=n)
         self.add_input('blend', shape=n)
+        self.add_input('tmin', shape=n)
 
-        self.add_output('t', shape=n)
+        self.add_output('tmargin', shape=n)
 
-        self.declare_partials('t', ['chord', 'blend'])
+        self.declare_partials('tmargin', ['chord', 'blend'])
 
     def compute(self, inputs, outputs):
 
         for i in range(n):
-            outputs['t'][i] = tau[i].thickness(inputs['chord'][i], inputs['blend'][i])
+            outputs['tmargin'][i] = tau[i].thickness(inputs['chord'][i], inputs['blend'][i]) - inputs['tmin'][i]
 
 
     def compute_partials(self, inputs, J):
@@ -95,8 +97,8 @@ class Thickness(ExplicitComponent):
         for i in range(n):
             dt_dchord[i], dt_dblend[i] = tau[i].derivatives(inputs['chord'][i], inputs['blend'][i])
 
-        J['t', 'chord'] = np.diag(dt_dchord)
-        J['t', 'blend'] = np.diag(dt_dblend)
+        J['tmargin', 'chord'] = np.diag(dt_dchord)
+        J['tmargin', 'blend'] = np.diag(dt_dblend)
 
 
 
@@ -188,9 +190,9 @@ if __name__ == '__main__':
         tau[i] = BlendedThickness(tau_each[afidx[i]], tau_each[afidx[i]+1])
     tau = tau[1:-1]
 
-    # tmax
-    tmax = initial['optimization']['Constraints']['Absolute_Thickness']['Lower_Limit']['Limit']
-    tmax = tmax[1:-1]  # remove hub/tip
+    # tmin
+    tmin = initial['optimization']['Constraints']['Absolute_Thickness']['Lower_Limit']['Limit']
+    tmin = tmin[1:-1]  # remove hub/tip
 
     # hub radius
     Rhub = initial['planform']['hub_radius']
@@ -198,8 +200,11 @@ if __name__ == '__main__':
     r = Rhub + z[1:-1]  # chop off hub/tip (loads are zero)
     Rtip = Rhub + z[-1]
 
-    # create a group
-    model = Group()
+    # load other constraints
+    Tfactor = initial['optimization']['Constraints']['Rotor_Thrust']['Upper_Limit']
+    Bfwfactor = initial['optimization']['Constraints']['Root_Flap_Wise_Bending_Moment']['Upper_Limit']
+
+    # create an input component
     ivc = IndepVarComp()
     ivc.add_output('r', r)
     ivc.add_output('chord', initial['planform']['Chord'][1:-1])  # remove hub/tip
@@ -216,6 +221,7 @@ if __name__ == '__main__':
     ivc.add_output('shearExp', 0.0)
     ivc.add_output('nSector', 1)
     ivc.add_output('blend', blendingweight)
+    ivc.add_output('tmin', tmin)
     n -= 2  # removed hub/tip
 
     # setup operational parameters
@@ -232,35 +238,154 @@ if __name__ == '__main__':
     Omega = np.maximum(Omega, Omegamin)
     Prated = initial['control']['Maximum_Mechanical_Power']
 
-    pitch = np.zeros_like(V)  # some (but not all) of these need to be optimization variables
+    # pitch = np.zeros_like(V)  # some (but not all) of these need to be optimization variables
+    pitch = 20*np.ones_like(V)  # some (but not all) of these need to be optimization variables
 
     ivc.add_output('Uhub', V)
     ivc.add_output('Omega', Omega)
     ivc.add_output('pitch', pitch)
     ivc.add_output('PDF', pdf)
 
+    model = Group()
     model.add_subsystem('inputs', ivc, promotes=['*'])
     model.add_subsystem('ccblade', CCBlade(), promotes=['*'])
-    model.add_subsystem('thickness', Thickness(), promotes=['*'])
+    model.add_subsystem('thickness', ThicknessMargin(), promotes=['*'])
     model.add_subsystem('aep', AEP(), promotes=['*'])
 
     prob = Problem(model)
+
+    # -------- power regulation optimization (just to set inital values) -----
+
+    # # run optimization to determine pitch for base model
+    # prob.driver = pyOptSparseDriver()
+    # prob.driver.options['optimizer'] = "SNOPT"
+
+    # # prob.driver.opt_settings['Major optimality tolerance'] = 1e-6
+
+    # prob.model.add_design_var('pitch', lower=0.0, upper=20.0)
+    # prob.model.add_objective('AEP', scaler=-1.0/1e7)  # maximize
+
+    # # to add the constraint to the model
+    # prob.model.add_constraint('P', lower=0.0, scaler=1.0/Prated, upper=Prated)
+
+    # prob.setup()
+    # prob.run_driver()
+
+
+    # prob.setup()
+    # # prob['pitch'] = [0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.32391674, 3.14215928, 5.17330117, 6.88514161, 8.41286035, 11.13157035, 13.56485978, 18.92794969]
+    # # # prob.check_partials(compact_print=True)
+    # prob.run_model()
+
+    # print prob['pitch']
+    # print prob['AEP']
+    # print repr(prob['P'])
+    # print np.amax(prob['T'])
+    # print np.amax(prob['Bfw'])
+
+    # import matplotlib.pyplot as plt
+    # plt.figure()
+    # plt.plot(r, prob['chord'])
+    # plt.figure()
+    # plt.plot(r, prob['t'])
+    # plt.plot(r, tmin)
+    # plt.figure()
+    # plt.plot(prob['Uhub'], prob['P'])
+    # plt.plot([4.0, 25.0], [Prated, Prated])
+    # plt.figure()
+    # plt.plot(V, Omega)
+    # plt.show()
+
+    # set values from initial power regulation optimization
+
+    pitch0 = [0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.32391674, 3.14215928, 5.17330117, 6.88514161, 8.41286035, 11.13157035, 13.56485978, 18.92794969]
+    AEP0 = 29285836.91244333
+    Tmax0 = 1257095.74514
+    Bfw0 = 24506700.5989
+
+    # # ------------ run actual optmization -----
+
+    # prob.driver = pyOptSparseDriver()
+    # prob.driver.options['optimizer'] = "SNOPT"
+
+    # # prob.driver.opt_settings['Major optimality tolerance'] = 1e-6
+
+    # prob.model.add_design_var('chord', lower=0.0, upper=10.0)
+    # prob.model.add_design_var('theta', lower=-10, upper=30.0)
+    # prob.model.add_design_var('blend', lower=0.0, upper=1.0)
+    # prob.model.add_design_var('pitch', lower=0.0, upper=20.0)
+
+    # prob.model.add_objective('AEP', scaler=-1.0/AEP0)  # maximize
+
+    # # to add the constraint to the model
+    # prob.model.add_constraint('P', lower=0.0, scaler=1.0/Prated, upper=Prated)
+    # prob.model.add_constraint('T', lower=0.0, scaler=1.0/Tmax0, upper=Tmax0*Tfactor)
+    # prob.model.add_constraint('Bfw', lower=0.0, scaler=1.0/Bfw0, upper=Bfw0*Bfwfactor)
+    # prob.model.add_constraint('tmargin', lower=0.0, upper=10.0)
+
+    # prob.setup()
+    # prob['pitch'] = pitch0
+    # prob.run_driver()
+
+    # print repr(prob['chord'])
+    # print repr(prob['theta'])
+    # print repr(prob['blend'])
+    # print repr(prob['pitch'])
+    # print repr(prob['AEP'])
+
+    # ------ print results ----
+
+    chord = np.array([ 8.93833333,  8.54816667,  7.81966667,  6.938     ,  5.97333333,
+        5.09516667,  8.8548126 ,  7.99550941,  5.95666667,  5.42055556,
+        4.96194444,  4.55583333,  4.15444444,  4.49634551,  4.1354921 ,
+        4.29336588,  4.34184261,  4.31958399,  4.28652301,  4.24613446,
+        4.20851552,  4.15745326,  4.10082724,  4.03664055,  3.96594352,
+        3.88826966,  3.78597026,  3.67576357,  3.54947714,  3.40284257,
+        3.23473786,  3.03996166,  2.80107282,  2.54414293,  2.26877459,
+        1.93628802,  1.54887319,  1.87872384])
+    theta = np.array([ 29.59961895,  20.60267425,  14.07574485,   8.39071291,
+         4.59898245,   1.82387254,  12.88868913,  10.93396311,
+         9.82700858,   8.61454412,   7.57391329,   6.6666137 ,
+         5.79337362,   4.13698913,   3.43315284,   3.63611537,
+         3.55495721,   3.47124253,   3.3807371 ,   3.28433599,
+         3.19708406,   3.09954296,   3.00175352,   2.89824626,
+         2.79710415,   2.69646859,   2.57279114,   2.4546052 ,
+         2.32859262,   2.1963466 ,   2.05580362,   1.89992937,
+         1.68740727,   1.48524427,   1.30470774,   1.0491293 ,
+         0.73660942,  -2.16956379])
+    blend = np.array([ 0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,
+        0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,
+        0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.])
+    pitch = np.array([  0.95132649,   0.67035572,   0.12989032,   0.        ,
+         0.        ,   0.        ,   0.        ,   0.        ,
+         0.        ,   0.37071199,   1.49137906,   3.22475018,
+         5.50216933,   7.26500237,   8.78991032,  10.17124843,
+        12.6620359 ,  14.92132383,  20.        ])
+    AEPopt = 32022268.73061096
+
     prob.setup()
+    prob['chord'] = chord
+    prob['theta'] = theta
+    prob['blend'] = blend
+    prob['pitch'] = pitch
     prob.run_model()
 
+    print prob['AEP']/AEP0
     print prob['AEP']
-    print prob['T']
-    print prob['Bfw']
+    # print repr(prob['P'])
+    print np.amax(prob['T'])/Tmax0
+    print np.amax(prob['Bfw'])/Bfw0
+    # print repr(Omega)
+    print np.amax(prob['T'])
+    print np.amax(prob['Bfw'])
 
     import matplotlib.pyplot as plt
     plt.figure()
     plt.plot(r, prob['chord'])
     plt.figure()
-    plt.plot(r, prob['t'])
-    plt.plot(r, tmax)
+    plt.plot(r, prob['tmargin'] + prob['tmin'])
+    plt.plot(r, tmin)
     plt.figure()
     plt.plot(prob['Uhub'], prob['P'])
     plt.plot([4.0, 25.0], [Prated, Prated])
-    plt.figure()
-    plt.plot(V, Omega)
     plt.show()
