@@ -32,6 +32,7 @@ class CCBlade(ExplicitComponent):
         self.add_output("T", shape=m)
         self.add_output("Q", shape=m)
         self.add_output("P", shape=m)
+        self.add_output("Bfw", shape=m)
 
         self.declare_partials('*', '*', method='fd')  # FIXME
 
@@ -47,9 +48,8 @@ class CCBlade(ExplicitComponent):
             usecd=True, derivatives=True)
 
         # evaluate power, thrust
-        outputs["P"], outputs["T"], outputs["Q"], dP, dT, dQ = ccblade.evaluate(
+        outputs["P"], outputs["T"], outputs["Q"], outputs["Bfw"], dP, dT, dQ, dBfw = ccblade.evaluate(
             inputs["Uhub"], inputs["Omega"], inputs["pitch"], coefficient=False)
-
 
 
 
@@ -250,6 +250,7 @@ if __name__ == '__main__':
 
     print prob['AEP']
     print prob['T']
+    print prob['Bfw']
 
     import matplotlib.pyplot as plt
     plt.figure()

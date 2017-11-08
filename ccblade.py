@@ -828,13 +828,16 @@ class CCBlade:
         npts = len(Uinf)
         T = np.zeros(npts)
         Q = np.zeros(npts)
+        Bfw = np.zeros(npts)
         P = np.zeros(npts)
 
         if self.derivatives:
             dT_ds = np.zeros((npts, 11))
             dQ_ds = np.zeros((npts, 11))
+            dBfw_ds = np.zeros((npts, 11))
             dT_dv = np.zeros((npts, 6, len(self.r)))
             dQ_dv = np.zeros((npts, 6, len(self.r)))
+            dBfw_dv = np.zeros((npts, 6, len(self.r)))
 
         for i in range(npts):  # iterate across conditions
 
@@ -849,19 +852,23 @@ class CCBlade:
 
                     Np, Tp, dNp, dTp = self.distributedAeroLoads(Uinf[i], Omega[i], pitch[i], azimuth)
 
-                    dT_ds_sub, dQ_ds_sub, dT_dv_sub, dQ_dv_sub = self.__thrustTorqueDeriv(
-                        Np, Tp, self._dNp_dX, self._dTp_dX, self._dNp_dprecurve, self._dTp_dprecurve, *args)
+                    dT_ds_sub, dQ_ds_sub, dBfw_ds_sub, dT_dv_sub, dQ_dv_sub, dBfw_dv_sub = \
+                        self.__thrustTorqueDeriv(Np, Tp, self._dNp_dX, self._dTp_dX,
+                            self._dNp_dprecurve, self._dTp_dprecurve, *args)
 
                     dT_ds[i, :] += self.B * dT_ds_sub / nsec
                     dQ_ds[i, :] += self.B * dQ_ds_sub / nsec
+                    dBfw_ds[i, :] += dBfw_ds_sub / nsec
                     dT_dv[i, :, :] += self.B * dT_dv_sub / nsec
                     dQ_dv[i, :, :] += self.B * dQ_dv_sub / nsec
+                    dBfw_dv[i, :, :] += dBfw_dv_sub / nsec
 
 
-                Tsub, Qsub = _bem.thrusttorque(Np, Tp, *args)
+                Tsub, Qsub, Bfwsub = _bem.thrusttorque(Np, Tp, *args)
 
                 T[i] += self.B * Tsub / nsec
                 Q[i] += self.B * Qsub / nsec
+                Bfw[i] += Bfwsub / nsec  # average across azimuth
 
 
         # Power
@@ -903,12 +910,12 @@ class CCBlade:
                 dCP_dv = (dQ_dv.T * CP/Q).T
 
                 # pack derivatives into dictionary
-                dCT, dCQ, dCP = self.__thrustTorqueDictionary(dCT_ds, dCQ_ds, dCP_ds, dCT_dv, dCQ_dv, dCP_dv, npts)
+                dCT, dCQ, dCP, dBfw = self.__thrustTorqueDictionary(dCT_ds, dCQ_ds, dCP_ds, dBfw_ds, dCT_dv, dCQ_dv, dCP_dv, dBfw_dv, npts)
 
-                return CP, CT, CQ, dCP, dCT, dCQ
+                return CP, CT, CQ, Bfw, dCP, dCT, dCQ, dBfw
 
             else:
-                return CP, CT, CQ
+                return CP, CT, CQ, Bfw
 
 
         if self.derivatives:
@@ -920,12 +927,12 @@ class CCBlade:
             dP_dv = (dQ_dv.T * Omega*pi/30.0).T
 
             # pack derivatives into dictionary
-            dT, dQ, dP = self.__thrustTorqueDictionary(dT_ds, dQ_ds, dP_ds, dT_dv, dQ_dv, dP_dv, npts)
+            dT, dQ, dP, dBfw = self.__thrustTorqueDictionary(dT_ds, dQ_ds, dP_ds, dBfw_ds, dT_dv, dQ_dv, dP_dv, dBfw_dv, npts)
 
-            return P, T, Q, dP, dT, dQ
+            return P, T, Q, Bfw, dP, dT, dQ, dBfw
 
         else:
-            return P, T, Q
+            return P, T, Q, Bfw
 
 
 
@@ -933,57 +940,77 @@ class CCBlade:
             r, precurve, presweep, precone, Rhub, Rtip, precurveTip, presweepTip):
         """derivatives of thrust and torque"""
 
-        Tb = np.array([1, 0])
-        Qb = np.array([0, 1])
+        Tb = np.array([1.0, 0, 0])
+        Qb = np.array([0, 1.0, 0])
+        Bfwb = np.array([0, 0, 1.0])
         Npb, Tpb, rb, precurveb, presweepb, preconeb, Rhubb, Rtipb, precurvetipb, presweeptipb = \
-            _bem.thrusttorque_bv(Np, Tp, r, precurve, presweep, precone, Rhub, Rtip, precurveTip, presweepTip, Tb, Qb)
-
+            _bem.thrusttorque_bv(Np, Tp, r, precurve, presweep, precone, Rhub, Rtip, precurveTip, presweepTip, Tb, Qb, Bfwb)
 
         # X = [r, chord, theta, Rhub, Rtip, blend, presweep, precone, tilt, hubHt, yaw, azimuth, Uinf, Omega, pitch]
 
         dT_dNp = Npb[0, :]
         dQ_dNp = Npb[1, :]
+        dBfw_dNp = Npb[2, :]
         dT_dTp = Tpb[0, :]
         dQ_dTp = Tpb[1, :]
+        dBfw_dTp = Tpb[2, :]
 
         # chain rule
         dT_dX = dT_dNp*dNp_dX + dT_dTp*dTp_dX
         dQ_dX = dQ_dNp*dNp_dX + dQ_dTp*dTp_dX
+        dBfw_dX = dBfw_dNp*dNp_dX + dBfw_dTp*dTp_dX
 
         dT_dr = dT_dX[0, :] + rb[0, :]
         dQ_dr = dQ_dX[0, :] + rb[1, :]
+        dBfw_dr = dBfw_dX[0, :] + rb[2, :]
         dT_dchord = dT_dX[1, :]
         dQ_dchord = dQ_dX[1, :]
+        dBfw_dchord = dBfw_dX[1, :]
         dT_dtheta = dT_dX[2, :]
         dQ_dtheta = dQ_dX[2, :]
+        dBfw_dtheta = dBfw_dX[2, :]
         dT_dRhub = np.sum(dT_dX[3, :]) + Rhubb[0]
         dQ_dRhub = np.sum(dQ_dX[3, :]) + Rhubb[1]
+        dBfw_dRhub = np.sum(dBfw_dX[3, :]) + Rhubb[2]
         dT_dRtip = np.sum(dT_dX[4, :]) + Rtipb[0]
         dQ_dRtip = np.sum(dQ_dX[4, :]) + Rtipb[1]
+        dBfw_dRtip = np.sum(dBfw_dX[4, :]) + Rtipb[2]
         dT_dblend = dT_dX[5, :]
         dQ_dblend = dQ_dX[5, :]
+        dBfw_dblend = dBfw_dX[5, :]
         dT_dpresweep = dT_dX[6, :] + presweepb[0, :]
         dQ_dpresweep = dQ_dX[6, :] + presweepb[1, :]
+        dBfw_dpresweep = dBfw_dX[6, :] + presweepb[2, :]
         dT_dprecone = np.sum(dT_dX[7, :]) + preconeb[0]*pi/180.0
         dQ_dprecone = np.sum(dQ_dX[7, :]) + preconeb[1]*pi/180.0
+        dBfw_dprecone = np.sum(dBfw_dX[7, :]) + preconeb[2]*pi/180.0
         dT_dtilt = np.sum(dT_dX[8, :])
         dQ_dtilt = np.sum(dQ_dX[8, :])
+        dBfw_dtilt = np.sum(dBfw_dX[8, :])
         dT_dhubht = np.sum(dT_dX[9, :])
         dQ_dhubht = np.sum(dQ_dX[9, :])
+        dBfw_dhubht = np.sum(dBfw_dX[9, :])
         dT_dprecurvetip = precurvetipb[0]
         dQ_dprecurvetip = precurvetipb[1]
+        dBfw_dprecurvetip = precurvetipb[2]
         dT_dpresweeptip = presweeptipb[0]
         dQ_dpresweeptip = presweeptipb[1]
+        dBfw_dpresweeptip = presweeptipb[2]
         dT_dprecurve = np.sum(dT_dNp*dNp_dprecurve + dT_dTp*dTp_dprecurve, axis=1) + precurveb[0, :]
         dQ_dprecurve = np.sum(dQ_dNp*dNp_dprecurve + dQ_dTp*dTp_dprecurve, axis=1) + precurveb[1, :]
+        dBfw_dprecurve = np.sum(dBfw_dNp*dNp_dprecurve + dBfw_dTp*dTp_dprecurve, axis=1) + precurveb[2, :]
         dT_dyaw = np.sum(dT_dX[10, :])
         dQ_dyaw = np.sum(dQ_dX[10, :])
+        dBfw_dyaw = np.sum(dBfw_dX[10, :])
         dT_dUinf = np.sum(dT_dX[12, :])
         dQ_dUinf = np.sum(dQ_dX[12, :])
+        dBfw_dUinf = np.sum(dBfw_dX[12, :])
         dT_dOmega = np.sum(dT_dX[13, :])
         dQ_dOmega = np.sum(dQ_dX[13, :])
+        dBfw_dOmega = np.sum(dBfw_dX[13, :])
         dT_dpitch = np.sum(dT_dX[14, :])
         dQ_dpitch = np.sum(dQ_dX[14, :])
+        dBfw_dpitch = np.sum(dBfw_dX[14, :])
 
 
         # scalars = [precone, tilt, hubHt, Rhub, Rtip, precurvetip, presweeptip, yaw, Uinf, Omega, pitch]
@@ -991,84 +1018,105 @@ class CCBlade:
             dT_dprecurvetip, dT_dpresweeptip, dT_dyaw, dT_dUinf, dT_dOmega, dT_dpitch])
         dQ_ds = np.array([dQ_dprecone, dQ_dtilt, dQ_dhubht, dQ_dRhub, dQ_dRtip,
             dQ_dprecurvetip, dQ_dpresweeptip, dQ_dyaw, dQ_dUinf, dQ_dOmega, dQ_dpitch])
+        dBfw_ds = np.array([dBfw_dprecone, dBfw_dtilt, dBfw_dhubht, dBfw_dRhub, dBfw_dRtip,
+            dBfw_dprecurvetip, dBfw_dpresweeptip, dBfw_dyaw, dBfw_dUinf, dBfw_dOmega, dBfw_dpitch])
 
 
         # vectors = [r, chord, theta, precurve, presweep, blend]
         dT_dv = np.vstack((dT_dr, dT_dchord, dT_dtheta, dT_dprecurve, dT_dpresweep, dT_dblend))
         dQ_dv = np.vstack((dQ_dr, dQ_dchord, dQ_dtheta, dQ_dprecurve, dQ_dpresweep, dQ_dblend))
+        dBfw_dv = np.vstack((dBfw_dr, dBfw_dchord, dBfw_dtheta, dBfw_dprecurve, dBfw_dpresweep, dBfw_dblend))
 
 
-        return dT_ds, dQ_ds, dT_dv, dQ_dv
+        return dT_ds, dQ_ds, dBfw_ds, dT_dv, dQ_dv, dBfw_dv
 
 
 
-    def __thrustTorqueDictionary(self, dT_ds, dQ_ds, dP_ds, dT_dv, dQ_dv, dP_dv, npts):
+    def __thrustTorqueDictionary(self, dT_ds, dQ_ds, dP_ds, dBfw_ds, dT_dv, dQ_dv, dP_dv, dBfw_dv, npts):
 
         # pack derivatives into dictionary
         dT = {}
         dQ = {}
         dP = {}
+        dBfw = {}
 
         # npts x 1
         dT['dprecone'] = dT_ds[:, 0].reshape(npts, 1)
         dQ['dprecone'] = dQ_ds[:, 0].reshape(npts, 1)
         dP['dprecone'] = dP_ds[:, 0].reshape(npts, 1)
+        dBfw['dprecone'] = dBfw_ds[:, 0].reshape(npts, 1)
         dT['dtilt'] = dT_ds[:, 1].reshape(npts, 1)
         dQ['dtilt'] = dQ_ds[:, 1].reshape(npts, 1)
         dP['dtilt'] = dP_ds[:, 1].reshape(npts, 1)
+        dBfw['dtilt'] = dBfw_ds[:, 1].reshape(npts, 1)
         dT['dhubHt'] = dT_ds[:, 2].reshape(npts, 1)
         dQ['dhubHt'] = dQ_ds[:, 2].reshape(npts, 1)
         dP['dhubHt'] = dP_ds[:, 2].reshape(npts, 1)
+        dBfw['dhubHt'] = dBfw_ds[:, 2].reshape(npts, 1)
         dT['dRhub'] = dT_ds[:, 3].reshape(npts, 1)
         dQ['dRhub'] = dQ_ds[:, 3].reshape(npts, 1)
         dP['dRhub'] = dP_ds[:, 3].reshape(npts, 1)
+        dBfw['dRhub'] = dBfw_ds[:, 3].reshape(npts, 1)
         dT['dRtip'] = dT_ds[:, 4].reshape(npts, 1)
         dQ['dRtip'] = dQ_ds[:, 4].reshape(npts, 1)
         dP['dRtip'] = dP_ds[:, 4].reshape(npts, 1)
+        dBfw['dRtip'] = dBfw_ds[:, 4].reshape(npts, 1)
         dT['dprecurveTip'] = dT_ds[:, 5].reshape(npts, 1)
         dQ['dprecurveTip'] = dQ_ds[:, 5].reshape(npts, 1)
         dP['dprecurveTip'] = dP_ds[:, 5].reshape(npts, 1)
+        dBfw['dprecurveTip'] = dBfw_ds[:, 5].reshape(npts, 1)
         dT['dpresweepTip'] = dT_ds[:, 6].reshape(npts, 1)
         dQ['dpresweepTip'] = dQ_ds[:, 6].reshape(npts, 1)
         dP['dpresweepTip'] = dP_ds[:, 6].reshape(npts, 1)
+        dBfw['dpresweepTip'] = dBfw_ds[:, 6].reshape(npts, 1)
         dT['dyaw'] = dT_ds[:, 7].reshape(npts, 1)
         dQ['dyaw'] = dQ_ds[:, 7].reshape(npts, 1)
         dP['dyaw'] = dP_ds[:, 7].reshape(npts, 1)
+        dBfw['dyaw'] = dBfw_ds[:, 7].reshape(npts, 1)
 
 
         # npts x npts (diagonal)
         dT['dUinf'] = np.diag(dT_ds[:, 8])
         dQ['dUinf'] = np.diag(dQ_ds[:, 8])
         dP['dUinf'] = np.diag(dP_ds[:, 8])
+        dBfw['dUinf'] = np.diag(dBfw_ds[:, 8])
         dT['dOmega'] = np.diag(dT_ds[:, 9])
         dQ['dOmega'] = np.diag(dQ_ds[:, 9])
         dP['dOmega'] = np.diag(dP_ds[:, 9])
+        dBfw['dOmega'] = np.diag(dBfw_ds[:, 9])
         dT['dpitch'] = np.diag(dT_ds[:, 10])
         dQ['dpitch'] = np.diag(dQ_ds[:, 10])
         dP['dpitch'] = np.diag(dP_ds[:, 10])
+        dBfw['dpitch'] = np.diag(dBfw_ds[:, 10])
 
 
         # npts x n
         dT['dr'] = dT_dv[:, 0, :]
         dQ['dr'] = dQ_dv[:, 0, :]
         dP['dr'] = dP_dv[:, 0, :]
+        dBfw['dr'] = dBfw_dv[:, 0, :]
         dT['dchord'] = dT_dv[:, 1, :]
         dQ['dchord'] = dQ_dv[:, 1, :]
         dP['dchord'] = dP_dv[:, 1, :]
+        dBfw['dchord'] = dBfw_dv[:, 1, :]
         dT['dtheta'] = dT_dv[:, 2, :]
         dQ['dtheta'] = dQ_dv[:, 2, :]
         dP['dtheta'] = dP_dv[:, 2, :]
+        dBfw['dtheta'] = dBfw_dv[:, 2, :]
         dT['dprecurve'] = dT_dv[:, 3, :]
         dQ['dprecurve'] = dQ_dv[:, 3, :]
         dP['dprecurve'] = dP_dv[:, 3, :]
+        dBfw['dprecurve'] = dBfw_dv[:, 3, :]
         dT['dpresweep'] = dT_dv[:, 4, :]
         dQ['dpresweep'] = dQ_dv[:, 4, :]
         dP['dpresweep'] = dP_dv[:, 4, :]
+        dBfw['dpresweep'] = dBfw_dv[:, 4, :]
         dT['dblend'] = dT_dv[:, 5, :]
         dQ['dblend'] = dQ_dv[:, 5, :]
         dP['dblend'] = dP_dv[:, 5, :]
+        dBfw['dblend'] = dBfw_dv[:, 5, :]
 
-        return dT, dQ, dP
+        return dT, dQ, dP, dBfw
 
 
 if __name__ == '__main__':
