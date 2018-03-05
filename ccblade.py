@@ -197,58 +197,111 @@ class CCAirfoil:
 
         return dcl_dalpha, dcl_dRe, dcd_dalpha, dcd_dRe
 
+
 class BlendedCCAirfoil:
 
-    def __init__(self, alpha1, Re1, cl1, cd1, alpha2, Re2, cl2, cd2):
-        self.af1 = CCAirfoil(alpha1, Re1, cl1, cd1)
-        self.af2 = CCAirfoil(alpha2, Re2, cl2, cd2)
+    def __init__(self, alpha0, Re0, cl0, cd0, alpha1, Re1, cl1, cd1,
+        alpha2, Re2, cl2, cd2, alpha3, Re3, cl3, cd3,
+        alpha4, Re4, cl4, cd4, alpha5, Re5, cl5, cd5):
+
+        self.af = [0]*6
+        self.af[0] = CCAirfoil(alpha0, Re0, cl0, cd0)
+        self.af[1] = CCAirfoil(alpha1, Re1, cl1, cd1)
+        self.af[2] = CCAirfoil(alpha2, Re2, cl2, cd2)
+        self.af[3] = CCAirfoil(alpha3, Re3, cl3, cd3)
+        self.af[4] = CCAirfoil(alpha4, Re4, cl4, cd4)
+        self.af[5] = CCAirfoil(alpha5, Re5, cl5, cd5)
 
     def evaluate(self, alpha, Re, blend):
-        cl1, cd1 = self.af1.evaluate(alpha, Re)
-        cl2, cd2 = self.af2.evaluate(alpha, Re)
 
-        cl = blend*cl1 + (1-blend)*cl2
-        cd = blend*cd1 + (1-blend)*cd2
+        idx = int(blend)
+        if idx == 5:
+            idx = idx - 1
+        beta = blend - idx
+
+        cl1, cd1 = self.af[idx].evaluate(alpha, Re)
+        cl2, cd2 = self.af[idx+1].evaluate(alpha, Re)
+
+        cl = (1-beta)*cl1 + beta*cl2
+        cd = (1-beta)*cd1 + beta*cd2
 
         return cl, cd
 
     def derivatives(self, alpha, Re, blend):
 
-        dcl_dalpha1, dcl_dRe1, dcd_dalpha1, dcd_dRe1 = self.af1.derivatives(alpha, Re)
-        dcl_dalpha2, dcl_dRe2, dcd_dalpha2, dcd_dRe2 = self.af2.derivatives(alpha, Re)
+        idx = int(blend)
+        if idx == 5:
+            idx = idx - 1
+        beta = blend - idx
 
-        dcl_dalpha = blend*dcl_dalpha1 + (1-blend)*dcl_dalpha2
-        dcd_dalpha = blend*dcd_dalpha1 + (1-blend)*dcd_dalpha2
-        dcl_dRe = blend*dcl_dRe1 + (1-blend)*dcl_dRe2
-        dcd_dRe = blend*dcd_dRe1 + (1-blend)*dcd_dRe2
+        dcl_dalpha1, dcl_dRe1, dcd_dalpha1, dcd_dRe1 = self.af[idx].derivatives(alpha, Re)
+        dcl_dalpha2, dcl_dRe2, dcd_dalpha2, dcd_dRe2 = self.af[idx+1].derivatives(alpha, Re)
 
-        cl1, cd1 = self.af1.evaluate(alpha, Re)
-        cl2, cd2 = self.af2.evaluate(alpha, Re)
+        dcl_dalpha = (1-beta)*dcl_dalpha1 + beta*dcl_dalpha2
+        dcd_dalpha = (1-beta)*dcd_dalpha1 + beta*dcd_dalpha2
+        dcl_dRe = (1-beta)*dcl_dRe1 + beta*dcl_dRe2
+        dcd_dRe = (1-beta)*dcd_dRe1 + beta*dcd_dRe2
 
-        dcl_dblend = cl1 - cl2
-        dcd_dblend = cd1 - cd2
+        cl1, cd1 = self.af[idx].evaluate(alpha, Re)
+        cl2, cd2 = self.af[idx+1].evaluate(alpha, Re)
+
+        dcl_dblend = -cl1 + cl2
+        dcd_dblend = -cd1 + cd2
 
         return dcl_dalpha, dcl_dRe, dcd_dalpha, dcd_dRe, dcl_dblend, dcd_dblend
 
+# class BlendedCCAirfoil:
 
-class BlendedThickness:
+#     def __init__(self, alpha1, Re1, cl1, cd1, alpha2, Re2, cl2, cd2):
+#         self.af1 = CCAirfoil(alpha1, Re1, cl1, cd1)
+#         self.af2 = CCAirfoil(alpha2, Re2, cl2, cd2)
 
-    def __init__(self, tau1, tau2):
-        self.tau1 = tau1
-        self.tau2 = tau2
+#     def evaluate(self, alpha, Re, blend):
+#         cl1, cd1 = self.af1.evaluate(alpha, Re)
+#         cl2, cd2 = self.af2.evaluate(alpha, Re)
 
-    def thickness(self, chord, blend):
-        tau = blend*self.tau1 + (1-blend)*self.tau2
-        t = tau*chord
+#         cl = blend*cl1 + (1-blend)*cl2
+#         cd = blend*cd1 + (1-blend)*cd2
 
-        return t
+#         return cl, cd
 
-    def derivatives(self, chord, blend):
+#     def derivatives(self, alpha, Re, blend):
 
-        dt_dchord = blend*self.tau1 + (1-blend)*self.tau2
-        dt_dblend = chord*self.tau1 - chord*self.tau2
+#         dcl_dalpha1, dcl_dRe1, dcd_dalpha1, dcd_dRe1 = self.af1.derivatives(alpha, Re)
+#         dcl_dalpha2, dcl_dRe2, dcd_dalpha2, dcd_dRe2 = self.af2.derivatives(alpha, Re)
 
-        return dt_dchord, dt_dblend
+#         dcl_dalpha = blend*dcl_dalpha1 + (1-blend)*dcl_dalpha2
+#         dcd_dalpha = blend*dcd_dalpha1 + (1-blend)*dcd_dalpha2
+#         dcl_dRe = blend*dcl_dRe1 + (1-blend)*dcl_dRe2
+#         dcd_dRe = blend*dcd_dRe1 + (1-blend)*dcd_dRe2
+
+#         cl1, cd1 = self.af1.evaluate(alpha, Re)
+#         cl2, cd2 = self.af2.evaluate(alpha, Re)
+
+#         dcl_dblend = cl1 - cl2
+#         dcd_dblend = cd1 - cd2
+
+#         return dcl_dalpha, dcl_dRe, dcd_dalpha, dcd_dRe, dcl_dblend, dcd_dblend
+
+
+# class BlendedThickness:
+
+#     def __init__(self, tau1, tau2):
+#         self.tau1 = tau1
+#         self.tau2 = tau2
+
+#     def thickness(self, chord, blend):
+#         tau = blend*self.tau1 + (1-blend)*self.tau2
+#         t = tau*chord
+
+#         return t
+
+#     def derivatives(self, chord, blend):
+
+#         dt_dchord = blend*self.tau1 + (1-blend)*self.tau2
+#         dt_dblend = chord*self.tau1 - chord*self.tau2
+
+#         return dt_dchord, dt_dblend
 
 # ------------------
 #  Main Class: CCBlade
@@ -331,7 +384,7 @@ class CCBlade:
         self.r = np.array(r)
         self.chord = np.array(chord)
         self.theta = np.radians(theta)
-        self.af = af
+        self.alltheafs = af
         self.blend = blend
         self.Rhub = Rhub
         self.Rtip = Rtip
@@ -612,7 +665,7 @@ class CCBlade:
         for i in range(n):
 
             # index dependent arguments
-            args = (self.r[i], self.chord[i], self.theta[i], self.af[i], self.blend[i], Vx[i], Vy[i])
+            args = (self.r[i], self.chord[i], self.theta[i], self.alltheafs, self.blend[i], Vx[i], Vy[i])
 
             if not rotating:  # non-rotating
 
